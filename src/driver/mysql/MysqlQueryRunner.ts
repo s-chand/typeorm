@@ -17,10 +17,12 @@ import {TableIndexOptions} from "../../schema-builder/options/TableIndexOptions"
 import {TableUnique} from "../../schema-builder/table/TableUnique";
 import {BaseQueryRunner} from "../../query-runner/BaseQueryRunner";
 import {Broadcaster} from "../../subscriber/Broadcaster";
-import {ColumnType, PromiseUtils} from "../../index";
+import {ColumnType} from "../../index";
 import {TableCheck} from "../../schema-builder/table/TableCheck";
 import {IsolationLevel} from "../types/IsolationLevel";
 import {TableExclusion} from "../../schema-builder/table/TableExclusion";
+import {VersionUtils} from "../../util/VersionUtils";
+import {ReplicationMode} from "../types/ReplicationMode";
 
 /**
  * Runs queries on a single mysql database connection.
@@ -49,7 +51,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
     // Constructor
     // -------------------------------------------------------------------------
 
-    constructor(driver: MysqlDriver, mode: "master"|"slave" = "master") {
+    constructor(driver: MysqlDriver, mode: ReplicationMode) {
         super();
         this.driver = driver;
         this.connection = driver.connection;
@@ -186,10 +188,10 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             try {
                 const databaseConnection = await this.connect();
                 this.driver.connection.logger.logQuery(query, parameters, this);
-                const stream = databaseConnection.query(query, parameters);
-                if (onEnd) stream.on("end", onEnd);
-                if (onError) stream.on("error", onError);
-                ok(stream);
+                const databaseQuery = databaseConnection.query(query, parameters);
+                if (onEnd) databaseQuery.on("end", onEnd);
+                if (onError) databaseQuery.on("error", onError);
+                ok(databaseQuery.stream());
 
             } catch (err) {
                 fail(err);
@@ -396,8 +398,10 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                 indexType += "SPATIAL ";
             if (index.isFulltext)
                 indexType += "FULLTEXT ";
-            upQueries.push(new Query(`ALTER TABLE ${this.escapePath(newTable)} DROP INDEX \`${index.name}\`, ADD ${indexType}INDEX \`${newIndexName}\` (${columnNames})`));
-            downQueries.push(new Query(`ALTER TABLE ${this.escapePath(newTable)} DROP INDEX \`${newIndexName}\`, ADD ${indexType}INDEX \`${index.name}\` (${columnNames})`));
+            const indexParser = index.isFulltext && index.parser ? ` WITH PARSER ${index.parser}` : "";
+
+            upQueries.push(new Query(`ALTER TABLE ${this.escapePath(newTable)} DROP INDEX \`${index.name}\`, ADD ${indexType}INDEX \`${newIndexName}\` (${columnNames})${indexParser}`));
+            downQueries.push(new Query(`ALTER TABLE ${this.escapePath(newTable)} DROP INDEX \`${newIndexName}\`, ADD ${indexType}INDEX \`${index.name}\` (${columnNames})${indexParser}`));
 
             // replace constraint name
             index.name = newIndexName;
@@ -408,7 +412,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             // build new constraint name
             const columnNames = foreignKey.columnNames.map(column => `\`${column}\``).join(", ");
             const referencedColumnNames = foreignKey.referencedColumnNames.map(column => `\`${column}\``).join(",");
-            const newForeignKeyName = this.connection.namingStrategy.foreignKeyName(newTable, foreignKey.columnNames);
+            const newForeignKeyName = this.connection.namingStrategy.foreignKeyName(newTable, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
 
             // build queries
             let up = `ALTER TABLE ${this.escapePath(newTable)} DROP FOREIGN KEY \`${foreignKey.name}\`, ADD CONSTRAINT \`${newForeignKeyName}\` FOREIGN KEY (${columnNames}) ` +
@@ -515,7 +519,9 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
      * Creates a new columns from the column in the table.
      */
     async addColumns(tableOrName: Table|string, columns: TableColumn[]): Promise<void> {
-        await PromiseUtils.runInSequence(columns, column => this.addColumn(tableOrName, column));
+        for (const column of columns) {
+            await this.addColumn(tableOrName, column);
+        }
     }
 
     /**
@@ -585,8 +591,10 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                         indexType += "SPATIAL ";
                     if (index.isFulltext)
                         indexType += "FULLTEXT ";
-                    upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP INDEX \`${index.name}\`, ADD ${indexType}INDEX \`${newIndexName}\` (${columnNames})`));
-                    downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP INDEX \`${newIndexName}\`, ADD ${indexType}INDEX \`${index.name}\` (${columnNames})`));
+                    const indexParser = index.isFulltext && index.parser ? ` WITH PARSER ${index.parser}` : "";
+
+                    upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP INDEX \`${index.name}\`, ADD ${indexType}INDEX \`${newIndexName}\` (${columnNames})${indexParser}`));
+                    downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP INDEX \`${newIndexName}\`, ADD ${indexType}INDEX \`${index.name}\` (${columnNames})${indexParser}`));
 
                     // replace constraint name
                     index.name = newIndexName;
@@ -599,7 +607,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                     foreignKey.columnNames.push(newColumn.name);
                     const columnNames = foreignKey.columnNames.map(column => `\`${column}\``).join(", ");
                     const referencedColumnNames = foreignKey.referencedColumnNames.map(column => `\`${column}\``).join(",");
-                    const newForeignKeyName = this.connection.namingStrategy.foreignKeyName(clonedTable, foreignKey.columnNames);
+                    const newForeignKeyName = this.connection.namingStrategy.foreignKeyName(clonedTable, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
 
                     // build queries
                     let up = `ALTER TABLE ${this.escapePath(table)} DROP FOREIGN KEY \`${foreignKey.name}\`, ADD CONSTRAINT \`${newForeignKeyName}\` FOREIGN KEY (${columnNames}) ` +
@@ -728,7 +736,9 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
      * Changes a column in the table.
      */
     async changeColumns(tableOrName: Table|string, changedColumns: { newColumn: TableColumn, oldColumn: TableColumn }[]): Promise<void> {
-        await PromiseUtils.runInSequence(changedColumns, changedColumn => this.changeColumn(tableOrName, changedColumn.oldColumn, changedColumn.newColumn));
+        for (const {oldColumn, newColumn} of changedColumns) {
+            await this.changeColumn(tableOrName, oldColumn, newColumn);
+        }
     }
 
     /**
@@ -820,7 +830,9 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
      * Drops the columns in the table.
      */
     async dropColumns(tableOrName: Table|string, columns: TableColumn[]): Promise<void> {
-        await PromiseUtils.runInSequence(columns, column => this.dropColumn(tableOrName, column));
+        for (const column of columns) {
+            await this.dropColumn(tableOrName, column);
+        }
     }
 
     /**
@@ -1004,7 +1016,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
 
         // new FK may be passed without name. In this case we generate FK name manually.
         if (!foreignKey.name)
-            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table.name, foreignKey.columnNames);
+            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table.name, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
 
         const up = this.createForeignKeySql(table, foreignKey);
         const down = this.dropForeignKeySql(table, foreignKey);
@@ -1188,47 +1200,183 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             return [];
 
         const currentDatabase = await this.getCurrentDatabase();
-        const tablesCondition = tableNames.map(tableName => {
+
+        // The following SQL brought to you by:
+        //   A terrible understanding of https://dev.mysql.com/doc/refman/8.0/en/information-schema-optimization.html
+        //
+        // Short Version:
+        // INFORMATION_SCHEMA is a weird metadata virtual table and follows VERY FEW of the normal
+        // query optimization rules.  Depending on the columns you query against & the columns you're SELECTing
+        // there can be a drastically different query performance - this is because the tables map to
+        // data on the disk and some pieces of data require a scan of the data directory, the database files, etc
+
+        // With most of these, you'll want to do an `EXPLAIN` when making changes to make sure
+        // the changes you're making aren't changing the query performance profile negatively
+        // When you do the explain you'll want to look at the `Extra` field -
+        // It will look something like: "Using where; {FILE_OPENING}; Scanned {DB_NUM} databases"
+        // FILE_OPENING will commonly be OPEN_FRM_ONLY or OPEN_FULL_TABLE - you want to aim to NOT do
+        // an OPEN_FULL_TABLE unless necessary. DB_NUM may be a number or "all" - you really want to
+        // keep this to 0 or 1.  Ideally 0. "All" means you've scanned all databases - not good.
+        //
+        // For more info, see the above link to the MySQL docs.
+        //
+        // Something not noted in the docs is that complex `WHERE` clauses - such as `OR` expressions -
+        // will cause the query to not hit the optimizations & do full scans.  This is why
+        // a number of queries below do `UNION`s of single `WHERE` clauses.
+
+        // Avoid data directory scan: TABLE_SCHEMA
+        // Avoid database directory scan: TABLE_NAME
+        // Full columns: CARDINALITY & INDEX_TYPE - everything else is FRM only
+        const statsSubquerySql = tableNames.map(tableName => {
             let [database, name] = tableName.split(".");
             if (!name) {
                 name = database;
                 database = this.driver.database || currentDatabase;
             }
-            return `(\`TABLE_SCHEMA\` = '${database}' AND \`TABLE_NAME\` = '${name}')`;
-        }).join(" OR ");
-        const tablesSql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`TABLES\` WHERE ` + tablesCondition;
+            return `
+                SELECT
+                    *
+                FROM \`INFORMATION_SCHEMA\`.\`STATISTICS\`
+                WHERE
+                    \`TABLE_SCHEMA\` = '${database}'
+                    AND
+                    \`TABLE_NAME\` = '${name}'
+            `;
+        }).join(" UNION ");
 
-        const columnsSql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`COLUMNS\` WHERE ` + tablesCondition;
-
-        const primaryKeySql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` WHERE \`CONSTRAINT_NAME\` = 'PRIMARY' AND (${tablesCondition})`;
-
-        const collationsSql = `SELECT \`SCHEMA_NAME\`, \`DEFAULT_CHARACTER_SET_NAME\` as \`CHARSET\`, \`DEFAULT_COLLATION_NAME\` AS \`COLLATION\` FROM \`INFORMATION_SCHEMA\`.\`SCHEMATA\``;
-
-        const indicesCondition = tableNames.map(tableName => {
+        // Avoid data directory scan: TABLE_SCHEMA
+        // Avoid database directory scan: TABLE_NAME
+        // All columns will hit the full table.
+        const kcuSubquerySql = tableNames.map(tableName => {
             let [database, name] = tableName.split(".");
             if (!name) {
                 name = database;
                 database = this.driver.database || currentDatabase;
             }
-            return `(\`s\`.\`TABLE_SCHEMA\` = '${database}' AND \`s\`.\`TABLE_NAME\` = '${name}')`;
-        }).join(" OR ");
-        const indicesSql = `SELECT \`s\`.* FROM \`INFORMATION_SCHEMA\`.\`STATISTICS\` \`s\` ` +
-            `LEFT JOIN \`INFORMATION_SCHEMA\`.\`REFERENTIAL_CONSTRAINTS\` \`rc\` ON \`s\`.\`INDEX_NAME\` = \`rc\`.\`CONSTRAINT_NAME\` ` +
-            `WHERE (${indicesCondition}) AND \`s\`.\`INDEX_NAME\` != 'PRIMARY' AND \`rc\`.\`CONSTRAINT_NAME\` IS NULL`;
+            return `
+                SELECT
+                    *
+                FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` \`kcu\`
+                WHERE
+                    \`kcu\`.\`TABLE_SCHEMA\` = '${database}'
+                    AND
+                    \`kcu\`.\`TABLE_NAME\` = '${name}'
+            `;
+        }).join(" UNION ");
 
-        const foreignKeysCondition = tableNames.map(tableName => {
+        // Avoid data directory scan: CONSTRAINT_SCHEMA
+        // Avoid database directory scan: TABLE_NAME
+        // All columns will hit the full table.
+        const rcSubquerySql = tableNames.map(tableName => {
             let [database, name] = tableName.split(".");
             if (!name) {
                 name = database;
                 database = this.driver.database || currentDatabase;
             }
-            return `(\`kcu\`.\`TABLE_SCHEMA\` = '${database}' AND \`kcu\`.\`TABLE_NAME\` = '${name}')`;
-        }).join(" OR ");
-        const foreignKeysSql = `SELECT \`kcu\`.\`TABLE_SCHEMA\`, \`kcu\`.\`TABLE_NAME\`, \`kcu\`.\`CONSTRAINT_NAME\`, \`kcu\`.\`COLUMN_NAME\`, \`kcu\`.\`REFERENCED_TABLE_SCHEMA\`, ` +
-            `\`kcu\`.\`REFERENCED_TABLE_NAME\`, \`kcu\`.\`REFERENCED_COLUMN_NAME\`, \`rc\`.\`DELETE_RULE\` \`ON_DELETE\`, \`rc\`.\`UPDATE_RULE\` \`ON_UPDATE\` ` +
-            `FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` \`kcu\` ` +
-            `INNER JOIN \`INFORMATION_SCHEMA\`.\`REFERENTIAL_CONSTRAINTS\` \`rc\` ON \`rc\`.\`constraint_name\` = \`kcu\`.\`constraint_name\` ` +
-            `WHERE ` + foreignKeysCondition;
+            return `
+                SELECT
+                    *
+                FROM \`INFORMATION_SCHEMA\`.\`REFERENTIAL_CONSTRAINTS\`
+                WHERE
+                    \`CONSTRAINT_SCHEMA\` = '${database}'
+                    AND
+                    \`TABLE_NAME\` = '${name}'
+            `;
+        }).join(" UNION ");
+
+        // Avoid data directory scan: TABLE_SCHEMA
+        // Avoid database directory scan: TABLE_NAME
+        // We only use `TABLE_SCHEMA` and `TABLE_NAME` which is `SKIP_OPEN_TABLE`
+        const tablesSql = tableNames.map(tableName => {
+            let [database, name] = tableName.split(".");
+            if (!name) {
+                name = database;
+                database = this.driver.database || currentDatabase;
+            }
+            return `
+                SELECT
+                    \`TABLE_SCHEMA\`,
+                    \`TABLE_NAME\`
+                FROM
+                    \`INFORMATION_SCHEMA\`.\`TABLES\`
+                WHERE
+                    \`TABLE_SCHEMA\` = '${database}'
+                    AND
+                    \`TABLE_NAME\` = '${name}'
+                `;
+        }).join(" UNION ");
+
+        // Avoid data directory scan: TABLE_SCHEMA
+        // Avoid database directory scan: TABLE_NAME
+        // OPEN_FRM_ONLY applies to all columns
+        const columnsSql = tableNames.map(tableName => {
+            let [database, name] = tableName.split(".");
+            if (!name) {
+                name = database;
+                database = this.driver.database || currentDatabase;
+            }
+            return `
+                SELECT
+                    *
+                FROM
+                    \`INFORMATION_SCHEMA\`.\`COLUMNS\`
+                WHERE
+                    \`TABLE_SCHEMA\` = '${database}'
+                    AND
+                    \`TABLE_NAME\` = '${name}'
+                `;
+        }).join(" UNION ");
+
+        // No Optimizations are available for COLLATIONS
+        const collationsSql = `
+            SELECT
+                \`SCHEMA_NAME\`,
+                \`DEFAULT_CHARACTER_SET_NAME\` as \`CHARSET\`,
+                \`DEFAULT_COLLATION_NAME\` AS \`COLLATION\`
+            FROM \`INFORMATION_SCHEMA\`.\`SCHEMATA\`
+            `;
+
+        // Key Column Usage but only for PKs
+        const primaryKeySql = `SELECT * FROM (${kcuSubquerySql}) \`kcu\` WHERE \`CONSTRAINT_NAME\` = 'PRIMARY'`;
+
+        // Combine stats & referential constraints
+        const indicesSql = `
+            SELECT
+                \`s\`.*
+            FROM (${statsSubquerySql}) \`s\`
+            LEFT JOIN (${rcSubquerySql}) \`rc\`
+                ON
+                    \`s\`.\`INDEX_NAME\` = \`rc\`.\`CONSTRAINT_NAME\`
+                    AND
+                    \`s\`.\`TABLE_SCHEMA\` = \`rc\`.\`CONSTRAINT_SCHEMA\`
+            WHERE
+                \`s\`.\`INDEX_NAME\` != 'PRIMARY'
+                AND
+                \`rc\`.\`CONSTRAINT_NAME\` IS NULL
+            `;
+
+        // Combine Key Column Usage & Referential Constraints
+        const foreignKeysSql = `
+            SELECT
+                \`kcu\`.\`TABLE_SCHEMA\`,
+                \`kcu\`.\`TABLE_NAME\`,
+                \`kcu\`.\`CONSTRAINT_NAME\`,
+                \`kcu\`.\`COLUMN_NAME\`,
+                \`kcu\`.\`REFERENCED_TABLE_SCHEMA\`,
+                \`kcu\`.\`REFERENCED_TABLE_NAME\`,
+                \`kcu\`.\`REFERENCED_COLUMN_NAME\`,
+                \`rc\`.\`DELETE_RULE\` \`ON_DELETE\`,
+                \`rc\`.\`UPDATE_RULE\` \`ON_UPDATE\`
+            FROM (${kcuSubquerySql}) \`kcu\`
+            INNER JOIN (${rcSubquerySql}) \`rc\`
+                ON
+                    \`rc\`.\`CONSTRAINT_SCHEMA\` = \`kcu\`.\`CONSTRAINT_SCHEMA\`
+                    AND
+                    \`rc\`.\`TABLE_NAME\` = \`kcu\`.\`TABLE_NAME\`
+                    AND
+                    \`rc\`.\`CONSTRAINT_NAME\` = \`kcu\`.\`CONSTRAINT_NAME\`
+            `;
+
         const [dbTables, dbColumns, dbPrimaryKeys, dbCollations, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
             this.query(tablesSql),
             this.query(columnsSql),
@@ -1243,6 +1391,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             return [];
 
         const isMariaDb = this.driver.options.type === "mariadb";
+        const dbVersion = await this.getVersion();
 
         // create tables for loaded tables
         return Promise.all(dbTables.map(async dbTable => {
@@ -1264,8 +1413,18 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                 .map(dbColumn => {
 
                     const columnUniqueIndex = dbIndices.find(dbIndex => {
-                        return this.driver.buildTableName(dbIndex["TABLE_NAME"], undefined, dbIndex["TABLE_SCHEMA"]) === tableFullName
-                            && dbIndex["COLUMN_NAME"] === dbColumn["COLUMN_NAME"] && dbIndex["NON_UNIQUE"] === "0";
+                        const indexTableFullName = this.driver.buildTableName(dbIndex["TABLE_NAME"], undefined, dbIndex["TABLE_SCHEMA"]);
+                        if (indexTableFullName !== tableFullName) {
+                            return false;
+                        }
+
+                        // Index is not for this column
+                        if (dbIndex["COLUMN_NAME"] !== dbColumn["COLUMN_NAME"]) {
+                            return false;
+                        }
+
+                        const nonUnique = parseInt(dbIndex["NON_UNIQUE"], 10);
+                        return nonUnique === 0;
                     });
 
                     const tableMetadata = this.connection.entityMetadatas.find(metadata => metadata.tablePath === table.name);
@@ -1280,6 +1439,8 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                     tableColumn.name = dbColumn["COLUMN_NAME"];
                     tableColumn.type = dbColumn["DATA_TYPE"].toLowerCase();
 
+                    tableColumn.zerofill = dbColumn["COLUMN_TYPE"].indexOf("zerofill") !== -1;
+                    tableColumn.unsigned = tableColumn.zerofill ? true : dbColumn["COLUMN_TYPE"].indexOf("unsigned") !== -1;
                     if (this.driver.withWidthColumnTypes.indexOf(tableColumn.type as ColumnType) !== -1) {
                         const width = dbColumn["COLUMN_TYPE"].substring(dbColumn["COLUMN_TYPE"].indexOf("(") + 1, dbColumn["COLUMN_TYPE"].indexOf(")"));
                         tableColumn.width = width && !this.isDefaultColumnWidth(table, tableColumn, parseInt(width)) ? parseInt(width) : undefined;
@@ -1290,12 +1451,22 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                         || (isMariaDb && dbColumn["COLUMN_DEFAULT"] === "NULL")) {
                         tableColumn.default = undefined;
 
+                    } else if (/^CURRENT_TIMESTAMP(\([0-9]*\))?$/i.test(dbColumn["COLUMN_DEFAULT"])) {
+                        // New versions of MariaDB return expressions in lowercase.  We need to set it in
+                        // uppercase so the comparison in MysqlDriver#compareDefaultValues does not fail.
+                        tableColumn.default = dbColumn["COLUMN_DEFAULT"].toUpperCase();
+                    } else if (isMariaDb && VersionUtils.isGreaterOrEqual(dbVersion, "10.2.7")) {
+                        // MariaDB started adding quotes to literals in COLUMN_DEFAULT since version 10.2.7
+                        // See https://mariadb.com/kb/en/library/information-schema-columns-table/
+                        tableColumn.default = dbColumn["COLUMN_DEFAULT"];
                     } else {
-                        tableColumn.default = dbColumn["COLUMN_DEFAULT"] === "CURRENT_TIMESTAMP" ? dbColumn["COLUMN_DEFAULT"] : `'${dbColumn["COLUMN_DEFAULT"]}'`;
+                        tableColumn.default = `'${dbColumn["COLUMN_DEFAULT"]}'`;
                     }
 
                     if (dbColumn["EXTRA"].indexOf("on update") !== -1) {
-                        tableColumn.onUpdate = dbColumn["EXTRA"].substring(dbColumn["EXTRA"].indexOf("on update") + 10);
+                        // New versions of MariaDB return expressions in lowercase.  We need to set it in
+                        // uppercase so the comparison in MysqlDriver#compareExtraValues does not fail.
+                        tableColumn.onUpdate = dbColumn["EXTRA"].substring(dbColumn["EXTRA"].indexOf("on update") + 10).toUpperCase();
                     }
 
                     if (dbColumn["GENERATION_EXPRESSION"]) {
@@ -1308,8 +1479,6 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                     tableColumn.isPrimary = dbPrimaryKeys.some(dbPrimaryKey => {
                         return this.driver.buildTableName(dbPrimaryKey["TABLE_NAME"], undefined, dbPrimaryKey["TABLE_SCHEMA"]) === tableFullName && dbPrimaryKey["COLUMN_NAME"] === tableColumn.name;
                     });
-                    tableColumn.zerofill = dbColumn["COLUMN_TYPE"].indexOf("zerofill") !== -1;
-                    tableColumn.unsigned = tableColumn.zerofill ? true : dbColumn["COLUMN_TYPE"].indexOf("unsigned") !== -1;
                     tableColumn.isGenerated = dbColumn["EXTRA"].indexOf("auto_increment") !== -1;
                     if (tableColumn.isGenerated)
                         tableColumn.generationStrategy = "increment";
@@ -1333,7 +1502,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                             tableColumn.scale = parseInt(dbColumn["NUMERIC_SCALE"]);
                     }
 
-                    if (tableColumn.type === "enum" || tableColumn.type === "simple-enum") {
+                    if (tableColumn.type === "enum" || tableColumn.type === "simple-enum" || tableColumn.type === "set") {
                         const colType = dbColumn["COLUMN_TYPE"];
                         const items = colType.substring(colType.indexOf("(") + 1, colType.indexOf(")")).split(",");
                         tableColumn.enum = (items as string[]).map(item => {
@@ -1384,11 +1553,14 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                         && index["TABLE_NAME"] === constraint["TABLE_NAME"]
                         && index["INDEX_NAME"] === constraint["INDEX_NAME"];
                 });
+
+                const nonUnique = parseInt(constraint["NON_UNIQUE"], 10);
+
                 return new TableIndex(<TableIndexOptions>{
                     table: table,
                     name: constraint["INDEX_NAME"],
                     columnNames: indices.map(i => i["COLUMN_NAME"]),
-                    isUnique: constraint["NON_UNIQUE"] === "0",
+                    isUnique: nonUnique === 0,
                     isSpatial: constraint["INDEX_TYPE"] === "SPATIAL",
                     isFulltext: constraint["INDEX_TYPE"] === "FULLTEXT"
                 });
@@ -1451,8 +1623,9 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                     indexType += "SPATIAL ";
                 if (index.isFulltext)
                     indexType += "FULLTEXT ";
+                const indexParser = index.isFulltext && index.parser ? ` WITH PARSER ${index.parser}` : "";
 
-                return `${indexType}INDEX \`${index.name}\` (${columnNames})`;
+                return `${indexType}INDEX \`${index.name}\` (${columnNames})${indexParser}`;
             }).join(", ");
 
             sql += `, ${indicesSql}`;
@@ -1462,7 +1635,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             const foreignKeysSql = table.foreignKeys.map(fk => {
                 const columnNames = fk.columnNames.map(columnName => `\`${columnName}\``).join(", ");
                 if (!fk.name)
-                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
                 const referencedColumnNames = fk.referencedColumnNames.map(columnName => `\`${columnName}\``).join(", ");
 
                 let constraint = `CONSTRAINT \`${fk.name}\` FOREIGN KEY (${columnNames}) REFERENCES ${this.escapePath(fk.referencedTableName)} (${referencedColumnNames})`;
@@ -1550,7 +1723,9 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             indexType += "SPATIAL ";
         if (index.isFulltext)
             indexType += "FULLTEXT ";
-        return new Query(`CREATE ${indexType}INDEX \`${index.name}\` ON ${this.escapePath(table)} (${columns})`);
+        const indexParser = index.isFulltext && index.parser ? ` WITH PARSER ${index.parser}` : "";
+
+        return new Query(`CREATE ${indexType}INDEX \`${index.name}\` ON ${this.escapePath(table)} (${columns})${indexParser}`);
     }
 
     /**
@@ -1636,7 +1811,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             c += " UNSIGNED";
         }
         if (column.enum)
-            c += ` (${column.enum.map(value => "'" + value + "'").join(", ")})`;
+            c += ` (${column.enum.map(value => "'" + value.replace("'", "''") + "'").join(", ")})`;
         if (column.charset)
             c += ` CHARACTER SET "${column.charset}"`;
         if (column.collation)
@@ -1650,13 +1825,49 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
         if (column.isGenerated && column.generationStrategy === "increment") // don't use skipPrimary here since updates can update already exist primary without auto inc.
             c += " AUTO_INCREMENT";
         if (column.comment)
-            c += ` COMMENT '${column.comment}'`;
+            c += ` COMMENT '${column.comment.replace("'", "''")}'`;
         if (column.default !== undefined && column.default !== null)
             c += ` DEFAULT ${column.default}`;
         if (column.onUpdate)
             c += ` ON UPDATE ${column.onUpdate}`;
 
         return c;
+    }
+
+    protected async getVersion(): Promise<string> {
+        const result = await this.query(`SELECT VERSION() AS \`version\``);
+        return result[0]["version"];
+    }
+
+    /**
+     * Checks if column display width is by default.
+     */
+    protected isDefaultColumnWidth(table: Table, column: TableColumn, width: number): boolean {
+        // if table have metadata, we check if length is specified in column metadata
+        if (this.connection.hasMetadata(table.name)) {
+            const metadata = this.connection.getMetadata(table.name);
+            const columnMetadata = metadata.findColumnWithDatabaseName(column.name);
+            if (columnMetadata && columnMetadata.width)
+                return false;
+        }
+
+        const defaultWidthForType = this.connection.driver.dataTypeDefaults
+            && this.connection.driver.dataTypeDefaults[column.type]
+            && this.connection.driver.dataTypeDefaults[column.type].width;
+
+        if (defaultWidthForType) {
+            // In MariaDB & MySQL 5.7, the default widths of certain numeric types are 1 less than
+            // the usual defaults when the column is unsigned.
+            const typesWithReducedUnsignedDefault = ["int", "tinyint", "smallint", "mediumint"];
+            const needsAdjustment = typesWithReducedUnsignedDefault.indexOf(column.type) !== -1;
+            if (column.unsigned && needsAdjustment) {
+                return (defaultWidthForType - 1) === width;
+            } else {
+                return defaultWidthForType === width;
+            }
+        }
+
+        return false;
     }
 
 }

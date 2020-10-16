@@ -5,23 +5,24 @@ import {RelationMetadataArgs} from "../../metadata-args/RelationMetadataArgs";
  * One-to-one relation allows to create direct relation between two entities. Entity1 have only one Entity2.
  * Entity1 is an owner of the relationship, and storages Entity1 id on its own side.
  */
-export function OneToOne<T>(typeFunction: (type?: any) => ObjectType<T>, options?: RelationOptions): Function;
+export function OneToOne<T>(typeFunctionOrTarget: string|((type?: any) => ObjectType<T>), 
+                            options?: RelationOptions): PropertyDecorator;
 
 /**
  * One-to-one relation allows to create direct relation between two entities. Entity1 have only one Entity2.
  * Entity1 is an owner of the relationship, and storages Entity1 id on its own side.
  */
-export function OneToOne<T>(typeFunction: (type?: any) => ObjectType<T>,
+export function OneToOne<T>(typeFunctionOrTarget: string|((type?: any) => ObjectType<T>),
                             inverseSide?: string|((object: T) => any),
-                            options?: RelationOptions): Function;
+                            options?: RelationOptions): PropertyDecorator;
 
 /**
  * One-to-one relation allows to create direct relation between two entities. Entity1 have only one Entity2.
  * Entity1 is an owner of the relationship, and storages Entity1 id on its own side.
  */
-export function OneToOne<T>(typeFunction: (type?: any) => ObjectType<T>,
+export function OneToOne<T>(typeFunctionOrTarget: string|((type?: any) => ObjectType<T>),
                             inverseSideOrOptions?: string|((object: T) => any)|RelationOptions,
-                            options?: RelationOptions): Function {
+                            options?: RelationOptions): PropertyDecorator {
 
     // normalize parameters
     let inverseSideProperty: string|((object: T) => any);
@@ -48,7 +49,7 @@ export function OneToOne<T>(typeFunction: (type?: any) => ObjectType<T>,
             // propertyType: reflectedType,
             isLazy: isLazy,
             relationType: "one-to-one",
-            type: typeFunction,
+            type: typeFunctionOrTarget,
             inverseSideProperty: inverseSideProperty,
             options: options
         } as RelationMetadataArgs);

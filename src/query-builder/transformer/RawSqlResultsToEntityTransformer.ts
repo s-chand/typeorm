@@ -63,8 +63,19 @@ export class RawSqlResultsToEntityTransformer {
             keys.push(...alias.metadata.primaryColumns.map(column => DriverUtils.buildColumnAlias(this.driver, alias.name, column.databaseName)));
         }
         rawResults.forEach(rawResult => {
-            const id = keys.map(key => rawResult[key]).join("_"); // todo: check partial
-            if (!id) return;
+            const id = keys.map(key => {
+                const keyValue = rawResult[key];
+
+                if (Buffer.isBuffer(keyValue)) {
+                    return keyValue.toString("hex");
+                }
+
+                if (typeof keyValue === "object") {
+                    return JSON.stringify(keyValue);
+                }
+
+                return keyValue;
+            }).join("_"); // todo: check partial
 
             const items = map.get(id);
             if (!items) {
@@ -206,7 +217,7 @@ export class RawSqlResultsToEntityTransformer {
 
             const idMaps = rawRelationIdResult.results.map(result => {
                 const entityPrimaryIds = this.extractEntityPrimaryIds(relation, result);
-                if (EntityMetadata.compareIds(entityPrimaryIds, valueMap) === false)
+                if (OrmUtils.compareIds(entityPrimaryIds, valueMap) === false)
                     return;
 
                 let columns: ColumnMetadata[];
@@ -246,8 +257,7 @@ export class RawSqlResultsToEntityTransformer {
                     }
                 }
                 return idMap;
-            }).filter(result => result);
-
+            }).filter(result => result !== undefined);
 
             const properties = rawRelationIdResult.relationIdAttribute.mapToPropertyPropertyPath.split(".");
             const mapToProperty = (properties: string[], map: ObjectLiteral, value: any): any => {

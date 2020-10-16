@@ -321,4 +321,15 @@ export interface MongoConnectionOptions extends BaseConnectionOptions {
      * Determines whether or not to use the new url parser. Default: false
      */
     readonly useNewUrlParser?: boolean;
+
+    /**
+     * Determines whether or not to use the new Server Discovery and Monitoring engine. Default: false
+     * https://github.com/mongodb/node-mongodb-native/releases/tag/v3.2.1
+     */
+    readonly useUnifiedTopology?: boolean;
+    
+    /**
+     * Automatic Client-Side Field Level Encryption configuration.
+     */
+    readonly autoEncryption?: any;
 }

@@ -5,6 +5,7 @@ export type DatabaseType =
     "mysql"|
     "postgres"|
     "cockroachdb"|
+    "sap"|
     "mariadb"|
     "sqlite"|
     "cordova"|
@@ -14,4 +15,7 @@ export type DatabaseType =
     "oracle"|
     "mssql"|
     "mongodb"|
-    "expo";
+    "aurora-data-api"|
+    "aurora-data-api-pg"|
+    "expo"|
+    "better-sqlite3";

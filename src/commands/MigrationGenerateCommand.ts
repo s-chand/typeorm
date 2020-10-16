@@ -5,7 +5,9 @@ import {createConnection} from "../index";
 import {MysqlDriver} from "../driver/mysql/MysqlDriver";
 import {camelCase} from "../util/StringUtils";
 import * as yargs from "yargs";
-const chalk = require("chalk");
+import {AuroraDataApiDriver} from "../driver/aurora-data-api/AuroraDataApiDriver";
+import chalk from "chalk";
+import { format } from "@sqltools/formatter/lib/sqlFormatter";
 
 /**
  * Generates a new migration file with sql needs to be executed to update schema.
@@ -26,11 +28,18 @@ export class MigrationGenerateCommand implements yargs.CommandModule {
             .option("n", {
                 alias: "name",
                 describe: "Name of the migration class.",
-                demand: true
+                demand: true,
+                type: "string"
             })
             .option("d", {
                 alias: "dir",
                 describe: "Directory where migration should be created."
+            })
+            .option("p", {
+                alias: "pretty",
+                type: "boolean",
+                default: false,
+                describe: "Pretty-print generated SQL",
             })
             .option("f", {
                 alias: "config",
@@ -75,23 +84,33 @@ export class MigrationGenerateCommand implements yargs.CommandModule {
             });
             connection = await createConnection(connectionOptions);
             const sqlInMemory = await connection.driver.createSchemaBuilder().log();
+
+            if (args.pretty) {
+                sqlInMemory.upQueries.forEach(upQuery => {
+                    upQuery.query = MigrationGenerateCommand.prettifyQuery(upQuery.query);
+                });
+                sqlInMemory.downQueries.forEach(downQuery => {
+                    downQuery.query = MigrationGenerateCommand.prettifyQuery(downQuery.query);
+                });
+            }
+
             const upSqls: string[] = [], downSqls: string[] = [];
 
             // mysql is exceptional here because it uses ` character in to escape names in queries, that's why for mysql
             // we are using simple quoted string instead of template string syntax
-            if (connection.driver instanceof MysqlDriver) {
+            if (connection.driver instanceof MysqlDriver || connection.driver instanceof AuroraDataApiDriver) {
                 sqlInMemory.upQueries.forEach(upQuery => {
-                    upSqls.push("        await queryRunner.query(\"" + upQuery.query.replace(new RegExp(`"`, "g"), `\\"`) + "\");");
+                    upSqls.push("        await queryRunner.query(\"" + upQuery.query.replace(new RegExp(`"`, "g"), `\\"`) + "\"" + MigrationGenerateCommand.queryParams(upQuery.parameters) + ");");
                 });
                 sqlInMemory.downQueries.forEach(downQuery => {
-                    downSqls.push("        await queryRunner.query(\"" + downQuery.query.replace(new RegExp(`"`, "g"), `\\"`) + "\");");
+                    downSqls.push("        await queryRunner.query(\"" + downQuery.query.replace(new RegExp(`"`, "g"), `\\"`) + "\"" + MigrationGenerateCommand.queryParams(downQuery.parameters) + ");");
                 });
             } else {
                 sqlInMemory.upQueries.forEach(upQuery => {
-                    upSqls.push("        await queryRunner.query(`" + upQuery.query.replace(new RegExp("`", "g"), "\\`") + "`);");
+                    upSqls.push("        await queryRunner.query(`" + upQuery.query.replace(new RegExp("`", "g"), "\\`") + "`" + MigrationGenerateCommand.queryParams(upQuery.parameters) + ");");
                 });
                 sqlInMemory.downQueries.forEach(downQuery => {
-                    downSqls.push("        await queryRunner.query(`" + downQuery.query.replace(new RegExp("`", "g"), "\\`") + "`);");
+                    downSqls.push("        await queryRunner.query(`" + downQuery.query.replace(new RegExp("`", "g"), "\\`") + "`" + MigrationGenerateCommand.queryParams(downQuery.parameters) + ");");
                 });
             }
 
@@ -103,7 +122,7 @@ export class MigrationGenerateCommand implements yargs.CommandModule {
 
                     console.log(chalk.green(`Migration ${chalk.blue(path)} has been generated successfully.`));
                 } else {
-                    console.log(chalk.yellow("Please specify migration name"));
+                    console.log(chalk.yellow("Please specify a migration name using the `-n` argument"));
                 }
             } else {
                 console.log(chalk.yellow(`No changes in database schema were found - cannot generate a migration. To create a new empty migration use "typeorm migration:create" command`));
@@ -124,19 +143,33 @@ export class MigrationGenerateCommand implements yargs.CommandModule {
     // -------------------------------------------------------------------------
 
     /**
+     * Formats query parameters for migration queries if parameters actually exist
+     */
+    protected static queryParams(parameters: any[] | undefined): string {
+      if (!parameters || !parameters.length) {
+        return "";
+      }
+
+      return `, ${JSON.stringify(parameters)}`;
+    }
+
+    /**
      * Gets contents of the migration file.
      */
     protected static getTemplate(name: string, timestamp: number, upSqls: string[], downSqls: string[]): string {
+        const migrationName = `${camelCase(name, true)}${timestamp}`;
+
         return `import {MigrationInterface, QueryRunner} from "typeorm";
 
-export class ${camelCase(name, true)}${timestamp} implements MigrationInterface {
+export class ${migrationName} implements MigrationInterface {
+    name = '${migrationName}'
 
-    public async up(queryRunner: QueryRunner): Promise<any> {
+    public async up(queryRunner: QueryRunner): Promise<void> {
 ${upSqls.join(`
 `)}
     }
 
-    public async down(queryRunner: QueryRunner): Promise<any> {
+    public async down(queryRunner: QueryRunner): Promise<void> {
 ${downSqls.join(`
 `)}
     }
@@ -145,4 +178,11 @@ ${downSqls.join(`
 `;
     }
 
+    /**
+     *
+     */
+    protected static prettifyQuery(query: string) {
+        const formattedQuery = format(query, { indent: "    " });
+        return "\n" + formattedQuery.replace(/^/gm, "            ") + "\n        ";
+    }
 }

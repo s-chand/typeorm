@@ -2,7 +2,6 @@ import {Driver} from "../Driver";
 import {ConnectionIsNotSetError} from "../../error/ConnectionIsNotSetError";
 import {ObjectLiteral} from "../../common/ObjectLiteral";
 import {DriverPackageNotInstalledError} from "../../error/DriverPackageNotInstalledError";
-import {DriverUtils} from "../DriverUtils";
 import {ColumnMetadata} from "../../metadata/ColumnMetadata";
 import {PostgresQueryRunner} from "./PostgresQueryRunner";
 import {DateUtils} from "../../util/DateUtils";
@@ -19,6 +18,7 @@ import {PostgresConnectionCredentialsOptions} from "./PostgresConnectionCredenti
 import {EntityMetadata} from "../../metadata/EntityMetadata";
 import {OrmUtils} from "../../util/OrmUtils";
 import {ApplyValueTransformers} from "../../util/ApplyValueTransformers";
+import {ReplicationMode} from "../types/ReplicationMode";
 
 /**
  * Organizes communication with PostgreSQL DBMS.
@@ -148,7 +148,9 @@ export class PostgresDriver implements Driver {
         "tstzrange",
         "daterange",
         "geometry",
-        "geography"
+        "geography",
+        "cube",
+        "ltree"
     ];
 
     /**
@@ -202,6 +204,8 @@ export class PostgresDriver implements Driver {
         createDateDefault: "now()",
         updateDate: "timestamp",
         updateDateDefault: "now()",
+        deleteDate: "timestamp",
+        deleteDateNullable: true,
         version: "int4",
         treeLevel: "int4",
         migrationId: "int4",
@@ -245,7 +249,11 @@ export class PostgresDriver implements Driver {
     // Constructor
     // -------------------------------------------------------------------------
 
-    constructor(connection: Connection) {
+    constructor(connection?: Connection) {
+        if (!connection) {
+            return;
+        }
+
         this.connection = connection;
         this.options = connection.options as PostgresConnectionOptions;
         this.isReplicated = this.options.replication ? true : false;
@@ -292,6 +300,83 @@ export class PostgresDriver implements Driver {
      * Makes any action after connection (e.g. create extensions in Postgres driver).
      */
     async afterConnect(): Promise<void> {
+        const extensionsMetadata = await this.checkMetadataForExtensions();
+
+        if (extensionsMetadata.hasExtensions) {
+            await Promise.all([this.master, ...this.slaves].map(pool => {
+                return new Promise((ok, fail) => {
+                    pool.connect(async (err: any, connection: any, release: Function) => {
+                        await this.enableExtensions(extensionsMetadata, connection);
+                        if (err) return fail(err);
+                        release();
+                        ok();
+                    });
+                });
+            }));
+        }
+
+        return Promise.resolve();
+    }
+
+    protected async enableExtensions(extensionsMetadata: any, connection: any) {
+        const { logger } = this.connection;
+
+        const {
+            hasUuidColumns,
+            hasCitextColumns,
+            hasHstoreColumns,
+            hasCubeColumns,
+            hasGeometryColumns,
+            hasLtreeColumns,
+            hasExclusionConstraints,
+        } = extensionsMetadata;
+
+        if (hasUuidColumns)
+            try {
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "${this.options.uuidExtension || "uuid-ossp"}"`);
+            } catch (_) {
+                logger.log("warn", `At least one of the entities has uuid column, but the '${this.options.uuidExtension || "uuid-ossp"}' extension cannot be installed automatically. Please install it manually using superuser rights, or select another uuid extension.`);
+            }
+        if (hasCitextColumns)
+            try {
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "citext"`);
+            } catch (_) {
+                logger.log("warn", "At least one of the entities has citext column, but the 'citext' extension cannot be installed automatically. Please install it manually using superuser rights");
+            }
+        if (hasHstoreColumns)
+            try {
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "hstore"`);
+            } catch (_) {
+                logger.log("warn", "At least one of the entities has hstore column, but the 'hstore' extension cannot be installed automatically. Please install it manually using superuser rights");
+            }
+        if (hasGeometryColumns)
+            try {
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "postgis"`);
+            } catch (_) {
+                logger.log("warn", "At least one of the entities has a geometry column, but the 'postgis' extension cannot be installed automatically. Please install it manually using superuser rights");
+            }
+        if (hasCubeColumns)
+            try {
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "cube"`);
+            } catch (_) {
+                logger.log("warn", "At least one of the entities has a cube column, but the 'cube' extension cannot be installed automatically. Please install it manually using superuser rights");
+            }
+        if (hasLtreeColumns)
+            try {
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "ltree"`);
+            } catch (_) {
+                logger.log("warn", "At least one of the entities has a cube column, but the 'ltree' extension cannot be installed automatically. Please install it manually using superuser rights");
+            }
+        if (hasExclusionConstraints)
+            try {
+                // The btree_gist extension provides operator support in PostgreSQL exclusion constraints
+                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "btree_gist"`);
+            } catch (_) {
+                logger.log("warn", "At least one of the entities has an exclusion constraint, but the 'btree_gist' extension cannot be installed automatically. Please install it manually using superuser rights");
+            }
+    }
+
+    protected async checkMetadataForExtensions() {
         const hasUuidColumns = this.connection.entityMetadatas.some(metadata => {
             return metadata.generatedColumns.filter(column => column.generationStrategy === "uuid").length > 0;
         });
@@ -301,57 +386,29 @@ export class PostgresDriver implements Driver {
         const hasHstoreColumns = this.connection.entityMetadatas.some(metadata => {
             return metadata.columns.filter(column => column.type === "hstore").length > 0;
         });
+        const hasCubeColumns = this.connection.entityMetadatas.some(metadata => {
+            return metadata.columns.filter(column => column.type === "cube").length > 0;
+        });
         const hasGeometryColumns = this.connection.entityMetadatas.some(metadata => {
             return metadata.columns.filter(column => this.spatialTypes.indexOf(column.type) >= 0).length > 0;
+        });
+        const hasLtreeColumns = this.connection.entityMetadatas.some(metadata => {
+            return metadata.columns.filter(column => column.type === "ltree").length > 0;
         });
         const hasExclusionConstraints = this.connection.entityMetadatas.some(metadata => {
             return metadata.exclusions.length > 0;
         });
-        if (hasUuidColumns || hasCitextColumns || hasHstoreColumns || hasGeometryColumns || hasExclusionConstraints) {
-            await Promise.all([this.master, ...this.slaves].map(pool => {
-                return new Promise((ok, fail) => {
-                    pool.connect(async (err: any, connection: any, release: Function) => {
-                        const { logger } = this.connection;
-                        if (err) return fail(err);
-                        if (hasUuidColumns)
-                            try {
-                                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "${this.options.uuidExtension || "uuid-ossp"}"`);
-                            } catch (_) {
-                                logger.log("warn", `At least one of the entities has uuid column, but the '${this.options.uuidExtension || "uuid-ossp"}' extension cannot be installed automatically. Please install it manually using superuser rights, or select another uuid extension.`);
-                            }
-                        if (hasCitextColumns)
-                            try {
-                                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "citext"`);
-                            } catch (_) {
-                                logger.log("warn", "At least one of the entities has citext column, but the 'citext' extension cannot be installed automatically. Please install it manually using superuser rights");
-                            }
-                        if (hasHstoreColumns)
-                            try {
-                                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "hstore"`);
-                            } catch (_) {
-                                logger.log("warn", "At least one of the entities has hstore column, but the 'hstore' extension cannot be installed automatically. Please install it manually using superuser rights");
-                            }
-                        if (hasGeometryColumns)
-                            try {
-                                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "postgis"`);
-                            } catch (_) {
-                                logger.log("warn", "At least one of the entities has a geometry column, but the 'postgis' extension cannot be installed automatically. Please install it manually using superuser rights");
-                            }
-                        if (hasExclusionConstraints)
-                            try {
-                                // The btree_gist extension provides operator support in PostgreSQL exclusion constraints
-                                await this.executeQuery(connection, `CREATE EXTENSION IF NOT EXISTS "btree_gist"`);
-                            } catch (_) {
-                                logger.log("warn", "At least one of the entities has an exclusion constraint, but the 'btree_gist' extension cannot be installed automatically. Please install it manually using superuser rights");
-                            }
-                        release();
-                        ok();
-                    });
-                });
-            }));
-        }
 
-        return Promise.resolve();
+        return {
+            hasUuidColumns,
+            hasCitextColumns,
+            hasHstoreColumns,
+            hasCubeColumns,
+            hasGeometryColumns,
+            hasLtreeColumns,
+            hasExclusionConstraints,
+            hasExtensions: hasUuidColumns || hasCitextColumns || hasHstoreColumns || hasGeometryColumns || hasCubeColumns || hasLtreeColumns || hasExclusionConstraints,
+        };
     }
 
     /**
@@ -377,7 +434,7 @@ export class PostgresDriver implements Driver {
     /**
      * Creates a query runner used to execute database queries.
      */
-    createQueryRunner(mode: "master"|"slave" = "master") {
+    createQueryRunner(mode: ReplicationMode): QueryRunner {
         return new PostgresQueryRunner(this, mode);
     }
 
@@ -414,9 +471,18 @@ export class PostgresDriver implements Driver {
             if (typeof value === "string") {
                 return value;
             } else {
-                return Object.keys(value).map(key => {
-                    return `"${key}"=>"${value[key]}"`;
-                }).join(", ");
+                // https://www.postgresql.org/docs/9.0/hstore.html
+                const quoteString = (value: unknown) => {
+                    // If a string to be quoted is `null` or `undefined`, we return a literal unquoted NULL.
+                    // This way, NULL values can be stored in the hstore object.
+                    if (value === null || typeof value === "undefined") {
+                        return "NULL";
+                    }
+                    // Convert non-null values to string since HStore only stores strings anyway.
+                    // To include a double quote or a backslash in a key or value, escape it with a backslash.
+                    return `"${`${value}`.replace(/(?=["\\])/g, "\\")}"`;
+                };
+                return Object.keys(value).map(key => quoteString(key) + "=>" + quoteString(value[key])).join(",");
             }
 
         } else if (columnMetadata.type === "simple-array") {
@@ -425,6 +491,14 @@ export class PostgresDriver implements Driver {
         } else if (columnMetadata.type === "simple-json") {
             return DateUtils.simpleJsonToString(value);
 
+        } else if (columnMetadata.type === "cube") {
+            if (columnMetadata.isArray) {
+                return `{${value.map((cube: number[]) => `"(${cube.join(",")})"`).join(",")}}`;
+            }
+            return `(${value.join(",")})`;
+
+        } else if (columnMetadata.type === "ltree") {
+            return value.split(".").filter(Boolean).join(".").replace(/[\s]+/g, "_");
         } else if (
             (
                 columnMetadata.type === "enum"
@@ -463,13 +537,13 @@ export class PostgresDriver implements Driver {
 
         } else if (columnMetadata.type === "hstore") {
             if (columnMetadata.hstoreType === "object") {
-                const regexp = /"(.*?)"=>"(.*?[^\\"])"/gi;
-                const matchValue = value.match(regexp);
+                const unescapeString = (str: string) => str.replace(/\\./g, (m) => m[1]);
+                const regexp = /"([^"\\]*(?:\\.[^"\\]*)*)"=>(?:(NULL)|"([^"\\]*(?:\\.[^"\\]*)*)")(?:,|$)/g;
                 const object: ObjectLiteral = {};
-                let match;
-                while (match = regexp.exec(matchValue)) {
-                    object[match[1].replace(`\\"`, `"`)] = match[2].replace(`\\"`, `"`);
-                }
+                `${value}`.replace(regexp, (_, key, nullValue, stringValue) => {
+                    object[unescapeString(key)] = nullValue ? null : unescapeString(stringValue);
+                    return "";
+                });
                 return object;
 
             } else {
@@ -481,6 +555,32 @@ export class PostgresDriver implements Driver {
 
         } else if (columnMetadata.type === "simple-json") {
             value = DateUtils.stringToSimpleJson(value);
+
+        } else if (columnMetadata.type === "cube") {
+            value = value.replace(/[\(\)\s]+/g, ""); // remove whitespace
+            if (columnMetadata.isArray) {
+                /**
+                 * Strips these groups from `{"1,2,3","",NULL}`:
+                 * 1. ["1,2,3", undefined]  <- cube of arity 3
+                 * 2. ["", undefined]         <- cube of arity 0
+                 * 3. [undefined, "NULL"]     <- NULL
+                 */
+                const regexp = /(?:\"((?:[\d\s\.,])*)\")|(?:(NULL))/g;
+                const unparsedArrayString = value;
+
+                value = [];
+                let cube: RegExpExecArray | null = null;
+                // Iterate through all regexp matches for cubes/null in array
+                while ((cube = regexp.exec(unparsedArrayString)) !== null) {
+                    if (cube[1] !== undefined) {
+                        value.push(cube[1].split(",").filter(Boolean).map(Number));
+                    } else {
+                        value.push(undefined);
+                    }
+                }
+            } else {
+                value = value.split(",").filter(Boolean).map(Number);
+            }
 
         } else if (columnMetadata.type === "enum" || columnMetadata.type === "simple-enum" ) {
             if (columnMetadata.isArray) {
@@ -634,7 +734,7 @@ export class PostgresDriver implements Driver {
         }
 
         if (typeof defaultValue === "number") {
-            return "" + defaultValue;
+            return `'${defaultValue}'`;
 
         } else if (typeof defaultValue === "boolean") {
             return defaultValue === true ? "true" : "false";
@@ -774,7 +874,7 @@ export class PostgresDriver implements Driver {
                 || tableColumn.type !== this.normalizeType(columnMetadata)
                 || tableColumn.length !== columnMetadata.length
                 || tableColumn.precision !== columnMetadata.precision
-                || tableColumn.scale !== columnMetadata.scale
+                || (columnMetadata.scale !== undefined && tableColumn.scale !== columnMetadata.scale)
                 // || tableColumn.comment !== columnMetadata.comment // todo
                 || (!tableColumn.isGenerated && this.lowerDefaultValueIfNecessary(this.normalizeDefault(columnMetadata)) !== tableColumn.default) // we included check for generated here, because generated columns already can have default values
                 || tableColumn.isPrimary !== columnMetadata.isPrimary
@@ -808,6 +908,13 @@ export class PostgresDriver implements Driver {
      */
     isUUIDGenerationSupported(): boolean {
         return true;
+    }
+
+    /**
+     * Returns true if driver supports fulltext indices.
+     */
+    isFullTextColumnTypeSupported(): boolean {
+        return false;
     }
 
     get uuidGenerator(): string {
@@ -863,30 +970,45 @@ export class PostgresDriver implements Driver {
      */
     protected async createPool(options: PostgresConnectionOptions, credentials: PostgresConnectionCredentialsOptions): Promise<any> {
 
-        credentials = Object.assign(credentials, DriverUtils.buildDriverOptions(credentials)); // todo: do it better way
+        credentials = Object.assign({}, credentials);
 
         // build connection options for the driver
+        // See: https://github.com/brianc/node-postgres/tree/master/packages/pg-pool#create
         const connectionOptions = Object.assign({}, {
+            connectionString: credentials.url,
             host: credentials.host,
             user: credentials.username,
             password: credentials.password,
             database: credentials.database,
             port: credentials.port,
-            ssl: credentials.ssl
+            ssl: credentials.ssl,
+            connectionTimeoutMillis: options.connectTimeoutMS
         }, options.extra || {});
 
         // create a connection pool
         const pool = new this.postgres.Pool(connectionOptions);
         const { logger } = this.connection;
+
+        const poolErrorHandler = options.poolErrorHandler || ((error: any) => logger.log("warn", `Postgres pool raised an error. ${error}`));
+
         /*
           Attaching an error handler to pool errors is essential, as, otherwise, errors raised will go unhandled and
           cause the hosting app to crash.
          */
-        pool.on("error", (error: any) => logger.log("warn", `Postgres pool raised an error. ${error}`));
+        pool.on("error", poolErrorHandler);
 
         return new Promise((ok, fail) => {
             pool.connect((err: any, connection: any, release: Function) => {
                 if (err) return fail(err);
+
+                if (options.logNotifications) {
+                    connection.on("notice", (msg: any) => {
+                        msg && this.connection.logger.log("info", msg.message);
+                    });
+                    connection.on("notification", (msg: any) => {
+                        msg && this.connection.logger.log("info", `Received NOTIFY on channel ${msg.channel}: ${msg.payload}.`);
+                    });
+                }
                 release();
                 ok(pool);
             });

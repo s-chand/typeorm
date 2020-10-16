@@ -98,7 +98,7 @@ If you want to set a base prefix for all database tables in your application you
 
 When using an entity constructor its arguments **must be optional**. Since ORM creates instances of entity classes when loading from the database, therefore it is not aware of your constructor arguments.
 
-Learn more about parameters @Entity in [Decorators reference](decorator-reference.md).
+Learn more about parameters `@Entity` in [Decorators reference](decorator-reference.md).
 
 ## Entity columns
 
@@ -200,6 +200,8 @@ You don't need to set this column - it will be automatically set.
 each time you call `save` of entity manager or repository.
 You don't need to set this column - it will be automatically set.
 
+* `@DeleteDateColumn` is a special column that is automatically set to the entity's delete time each time you call soft-delete of entity manager or repository. You don't need to set this column - it will be automatically set. If the @DeleteDateColumn is set, the default scope will be "non-deleted".
+
 * `@VersionColumn` is a special column that is automatically set to the version of the entity (incremental number)  
 each time you call `save` of entity manager or repository.
 You don't need to set this column - it will be automatically set.
@@ -289,12 +291,14 @@ or
 @Column({ type: "int", width: 200 })
 ```
 
+> Note about `bigint` type: `bigint` column type, used in SQL databases, doesn't fit into the regular `number` type and maps property to a `string` instead.
+
 ### Column types for `mysql` / `mariadb`
 
 `bit`, `int`, `integer`, `tinyint`, `smallint`, `mediumint`, `bigint`, `float`, `double`,
 `double precision`, `dec`, `decimal`, `numeric`, `fixed`, `bool`, `boolean`, `date`, `datetime`,
 `timestamp`, `time`, `year`, `char`, `nchar`, `national char`, `varchar`, `nvarchar`, `national varchar`,
-`text`, `tinytext`, `mediumtext`, `blob`, `longtext`, `tinyblob`, `mediumblob`, `longblob`, `enum`,
+`text`, `tinytext`, `mediumtext`, `blob`, `longtext`, `tinyblob`, `mediumblob`, `longblob`, `enum`, `set`,
 `json`, `binary`, `varbinary`, `geometry`, `point`, `linestring`, `polygon`, `multipoint`, `multilinestring`,
 `multipolygon`, `geometrycollection`
 
@@ -307,7 +311,7 @@ or
 `date`, `time`, `time without time zone`, `time with time zone`, `interval`, `bool`, `boolean`,
 `enum`, `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`, `cidr`, `inet`, `macaddr`,
 `tsvector`, `tsquery`, `uuid`, `xml`, `json`, `jsonb`, `int4range`, `int8range`, `numrange`,
-`tsrange`, `tstzrange`, `daterange`, `geometry`, `geography`
+`tsrange`, `tstzrange`, `daterange`, `geometry`, `geography`, `cube`, `ltree`
 
 ### Column types for `cockroachdb`
 
@@ -390,6 +394,52 @@ export class User {
 }
 ```
 
+### `set` column type
+
+`set` column type is supported by `mariadb` and `mysql`. There are various possible column definitions:
+
+Using typescript enums:
+```typescript
+export enum UserRole {
+    ADMIN = "admin",
+    EDITOR = "editor",
+    GHOST = "ghost"
+}
+
+@Entity()
+export class User {
+
+    @PrimaryGeneratedColumn()
+    id: number;
+
+    @Column({
+        type: "set",
+        enum: UserRole,
+        default: [UserRole.GHOST, UserRole.EDITOR]
+    })
+    roles: UserRole[]
+
+}
+```
+
+Using array with `set` values:
+```typescript
+export type UserRoleType = "admin" | "editor" | "ghost",
+
+@Entity()
+export class User {
+
+    @PrimaryGeneratedColumn()
+    id: number;
+
+    @Column({
+        type: "set",
+        enum: ["admin", "editor", "ghost"],
+        default: ["ghost", "editor"]
+    })
+    roles: UserRoleType[]
+}
+```
 
 ### `simple-array` column type
 

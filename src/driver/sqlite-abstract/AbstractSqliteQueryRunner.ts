@@ -304,7 +304,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
 
         // rename foreign key constraints
         newTable.foreignKeys.forEach(foreignKey => {
-            foreignKey.name = this.connection.namingStrategy.foreignKeyName(newTable, foreignKey.columnNames);
+            foreignKey.name = this.connection.namingStrategy.foreignKeyName(newTable, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
         });
 
         // rename indices
@@ -384,7 +384,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
                 changedTable.findColumnForeignKeys(changedColumnSet.oldColumn).forEach(fk => {
                     fk.columnNames.splice(fk.columnNames.indexOf(changedColumnSet.oldColumn.name), 1);
                     fk.columnNames.push(changedColumnSet.newColumn.name);
-                    fk.name = this.connection.namingStrategy.foreignKeyName(changedTable, fk.columnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(changedTable, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
                 });
 
                 changedTable.findColumnIndices(changedColumnSet.oldColumn).forEach(index => {
@@ -825,16 +825,30 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
                     }
                 }
 
-                // parse datatype and attempt to retrieve length
+                // parse datatype and attempt to retrieve length, precision and scale
                 let pos = tableColumn.type.indexOf("(");
                 if (pos !== -1) {
-                    let dataType = tableColumn.type.substr(0, pos);
+                    const fullType = tableColumn.type;
+                    let dataType = fullType.substr(0, pos);
                     if (!!this.driver.withLengthColumnTypes.find(col => col === dataType)) {
-                        let len = parseInt(tableColumn.type.substring(pos + 1, tableColumn.type.length - 1));
+                        let len = parseInt(fullType.substring(pos + 1, fullType.length - 1));
                         if (len) {
                             tableColumn.length = len.toString();
                             tableColumn.type = dataType; // remove the length part from the datatype
                         }
+                    }
+                    if (!!this.driver.withPrecisionColumnTypes.find(col => col === dataType)) {
+                        const re = new RegExp(`^${dataType}\\((\\d+),?\\s?(\\d+)?\\)`);
+                        const matches = fullType.match(re);
+                        if (matches && matches[1]) {
+                            tableColumn.precision = +matches[1];
+                        }
+                        if (!!this.driver.withScaleColumnTypes.find(col => col === dataType)) {
+                            if (matches && matches[2]) {
+                                tableColumn.scale = +matches[2];
+                            }
+                        }
+                        tableColumn.type = dataType; // remove the precision/scale part from the datatype
                     }
                 }
 
@@ -848,7 +862,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
                 const columnNames = ownForeignKeys.map(dbForeignKey => dbForeignKey["from"]);
                 const referencedColumnNames = ownForeignKeys.map(dbForeignKey => dbForeignKey["to"]);
                 // build foreign key name, because we can not get it directly.
-                const fkName = this.connection.namingStrategy.foreignKeyName(table, columnNames);
+                const fkName = this.connection.namingStrategy.foreignKeyName(table, columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
 
                 return new TableForeignKey({
                     name: fkName,
@@ -975,7 +989,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
             const foreignKeysSql = table.foreignKeys.map(fk => {
                 const columnNames = fk.columnNames.map(columnName => `"${columnName}"`).join(", ");
                 if (!fk.name)
-                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
                 const referencedColumnNames = fk.referencedColumnNames.map(columnName => `"${columnName}"`).join(", ");
 
                 let constraint = `CONSTRAINT "${fk.name}" FOREIGN KEY (${columnNames}) REFERENCES "${fk.referencedTableName}" (${referencedColumnNames})`;
@@ -996,6 +1010,11 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
         }
 
         sql += `)`;
+
+        const tableMetadata = this.connection.entityMetadatas.find(metadata => metadata.tableName === table.name);
+        if (tableMetadata && tableMetadata.withoutRowid) {
+            sql += " WITHOUT ROWID";
+        }
 
         return new Query(sql);
     }

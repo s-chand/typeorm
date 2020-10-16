@@ -10,6 +10,7 @@ import {SqlServerDriver} from "../driver/sqlserver/SqlServerDriver";
 import {MysqlDriver} from "../driver/mysql/MysqlDriver";
 import {NoConnectionOptionError} from "../error/NoConnectionOptionError";
 import {InitializedRelationError} from "../error/InitializedRelationError";
+import {AuroraDataApiDriver} from "../driver/aurora-data-api/AuroraDataApiDriver";
 
 /// todo: add check if there are multiple tables with the same name
 /// todo: add checks when generated column / table names are too long for the specific driver
@@ -68,7 +69,7 @@ export class EntityMetadataValidator {
                 return metadata !== entityMetadata && metadata.discriminatorValue === entityMetadata.discriminatorValue;
             });
             if (sameDiscriminatorValueEntityMetadata)
-                throw new Error(`Entities ${entityMetadata.name} and ${sameDiscriminatorValueEntityMetadata.name} as equal discriminator values. Make sure their discriminator values are not equal using @DiscriminatorValue decorator.`);
+                throw new Error(`Entities ${entityMetadata.name} and ${sameDiscriminatorValueEntityMetadata.name} have the same discriminator values. Make sure they are different while using the @ChildEntity decorator.`);
         }
 
         entityMetadata.relationCounts.forEach(relationCount => {
@@ -86,7 +87,7 @@ export class EntityMetadataValidator {
             });
         }
 
-        if (driver instanceof MysqlDriver) {
+        if (driver instanceof MysqlDriver || driver instanceof AuroraDataApiDriver) {
             const generatedColumns = entityMetadata.columns.filter(column => column.isGenerated && column.generationStrategy !== "uuid");
             if (generatedColumns.length > 1)
                 throw new Error(`Error in ${entityMetadata.name} entity. There can be only one auto-increment column in MySql table.`);
@@ -118,7 +119,7 @@ export class EntityMetadataValidator {
 
                 // get entity relation value and check if its an array
                 const relationInitializedValue = relation.getEntityValue(entityInstance);
-                if (relationInitializedValue instanceof Array)
+                if (Array.isArray(relationInitializedValue))
                     throw new InitializedRelationError(relation);
             }
         });

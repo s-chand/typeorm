@@ -16,6 +16,7 @@ import {ConnectionOptions} from "../../connection/ConnectionOptions";
 import {EntityMetadata} from "../../metadata/EntityMetadata";
 import {ObjectUtils} from "../../util/ObjectUtils";
 import {ApplyValueTransformers} from "../../util/ApplyValueTransformers";
+import {ReplicationMode} from "../types/ReplicationMode";
 
 /**
  * Organizes communication with MongoDB.
@@ -94,6 +95,8 @@ export class MongoDriver implements Driver {
         createDateDefault: "",
         updateDate: "int",
         updateDateDefault: "",
+        deleteDate: "int",
+        deleteDateNullable: true,
         version: "int",
         treeLevel: "int",
         migrationId: "int",
@@ -132,7 +135,7 @@ export class MongoDriver implements Driver {
     /**
      * Valid mongo connection options
      * NOTE: Keep sync with MongoConnectionOptions
-     * Sync with http://mongodb.github.io/node-mongodb-native/3.1/api/MongoClient.html
+     * Sync with http://mongodb.github.io/node-mongodb-native/3.5/api/MongoClient.html
      */
     protected validOptionNames: string[] = [
         "poolSize",
@@ -192,7 +195,9 @@ export class MongoDriver implements Driver {
         "auto_reconnect",
         "minSize",
         "monitorCommands",
-        "useNewUrlParser"
+        "useNewUrlParser",
+        "useUnifiedTopology",
+        "autoEncryption"
     ];
 
     // -------------------------------------------------------------------------
@@ -259,7 +264,7 @@ export class MongoDriver implements Driver {
     /**
      * Creates a query runner used to execute database queries.
      */
-    createQueryRunner(mode: "master"|"slave" = "master") {
+    createQueryRunner(mode: ReplicationMode) {
         return this.queryRunner!;
     }
 
@@ -383,6 +388,13 @@ export class MongoDriver implements Driver {
      * Returns true if driver supports uuid values generation on its own.
      */
     isUUIDGenerationSupported(): boolean {
+        return false;
+    }
+
+    /**
+     * Returns true if driver supports fulltext indices.
+     */
+    isFullTextColumnTypeSupported(): boolean {
         return false;
     }
 
